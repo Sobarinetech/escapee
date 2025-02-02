@@ -1,106 +1,140 @@
 import streamlit as st
-import google.generativeai as genai
-from io import BytesIO
-import json
-import matplotlib.pyplot as plt
-import re
-import os
+import google.auth
 from googleapiclient.discovery import build
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
+import google.generativeai as genai
+import json
+import re
+from io import BytesIO
+import matplotlib.pyplot as plt
 
-# Configure API Key securely from Streamlit's secrets
-genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-
-# Gmail API setup (credentials from Streamlit secrets)
-SERVICE_ACCOUNT_FILE = st.secrets["GMAIL_CREDENTIALS_JSON"]  # Path to your service account JSON
-SCOPES = ['https://www.googleapis.com/auth/gmail.compose'] # Permission to create drafts
-
-credentials = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-
-try:
-    service = build('gmail', 'v1', credentials=credentials)
-except Exception as e:
-    st.error(f"Error initializing Gmail API: {e}")
-    st.stop() # Stop execution if Gmail API fails
-
-
-# App Configuration
+# Streamlit configuration
 st.set_page_config(page_title="Escalytics", page_icon="📧", layout="wide")
 st.title("⚡Escalytics by EverTech")
 st.write("Extract insights, root causes, and actionable steps from emails.")
 
-# Sidebar for Features (All enabled by default)
+# Set up the Generative AI API key from Streamlit secrets
+genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+
+# Gmail API setup
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.modify']
+creds = None
+
+# Function to authenticate and build the Gmail service
+def authenticate_gmail():
+    if 'credentials' in st.secrets:
+        creds = Credentials.from_authorized_user_info(info=st.secrets["credentials"])
+    else:
+        st.error("Credentials not found in Streamlit secrets.")
+        return None
+    
+    # Build Gmail API service
+    return build('gmail', 'v1', credentials=creds)
+
+# Function to get latest email content
+def get_latest_email(service):
+    try:
+        results = service.users().messages().list(userId='me', labelIds=['INBOX'], q="is:unread").execute()
+        messages = results.get('messages', [])
+        if not messages:
+            return None
+        message = service.users().messages().get(userId='me', id=messages[0]['id']).execute()
+        email_data = message['payload']['headers']
+        subject = next(item['value'] for item in email_data if item["name"] == "Subject")
+        email_body = message['snippet']
+        return subject, email_body
+    except Exception as error:
+        st.error(f"Error getting email: {error}")
+        return None
+
+# Function to create a draft response in Gmail
+def create_draft(service, message_body):
+    try:
+        draft = {
+            'message': {
+                'to': 'recipient@example.com',  # Placeholder - replace with the recipient's email
+                'subject': 'Re: Your inquiry',  # Placeholder - Replace with a dynamic subject if needed
+                'body': {
+                    'text': message_body
+                }
+            }
+        }
+        result = service.users().messages().create(userId="me", body=draft).execute()
+        return result
+    except Exception as error:
+        st.error(f"Error creating draft: {error}")
+        return None
+
+# App Configuration (features and settings)
 st.sidebar.header("Settings")
 features = {
-    "sentiment": st.sidebar.checkbox("Perform Sentiment Analysis", value=True),
-    "highlights": st.sidebar.checkbox("Highlight Key Phrases", value=True),
     "response": st.sidebar.checkbox("Generate Suggested Response", value=True),
+    "highlights": st.sidebar.checkbox("Highlight Key Phrases", value=True),
+    "sentiment": st.sidebar.checkbox("Perform Sentiment Analysis", value=True),
     "wordcloud": st.sidebar.checkbox("Generate Word Cloud", value=True),
-    "grammar_check": st.sidebar.checkbox("Grammar Check", value=True),
-    "key_phrases": st.sidebar.checkbox("Extract Key Phrases", value=True),
-    "actionable_items": st.sidebar.checkbox("Extract Actionable Items", value=True),
     "root_cause": st.sidebar.checkbox("Root Cause Detection", value=True),
-    "culprit_identification": st.sidebar.checkbox("Culprit Identification", value=True),
-    "trend_analysis": st.sidebar.checkbox("Trend Analysis", value=True),
-    "risk_assessment": st.sidebar.checkbox("Risk Assessment", value=True),
-    "severity_detection": st.sidebar.checkbox("Severity Detection", value=True),
-    "critical_keywords": st.sidebar.checkbox("Critical Keyword Identification", value=True),
-    "export": st.sidebar.checkbox("Export Options", value=True),  # Export enabled by default
+    "export": st.sidebar.checkbox("Export Options", value=True)
 }
 
-# Input Email Section
-email_content = st.text_area("Paste your email content here:", height=200)
-MAX_EMAIL_LENGTH = 1000
+# Sentiment Analysis
+def get_sentiment(email_content):
+    positive_keywords = ["happy", "good", "great", "excellent", "love"]
+    negative_keywords = ["sad", "bad", "hate", "angry", "disappointed"]
+    sentiment_score = 0
+    for word in email_content.split():
+        if word.lower() in positive_keywords:
+            sentiment_score += 1
+        elif word.lower() in negative_keywords:
+            sentiment_score -= 1
+    return sentiment_score
 
-# ... (Rest of the functions for analysis remain the same)
+# Function to generate a draft reply
+def generate_draft_reply(email_content):
+    try:
+        response = genai.GenerativeModel("gemini-1.5-flash").generate_content(f"Draft a professional response to this email:\n\n{email_content[:1000]}")
+        return response.text.strip()
+    except Exception as e:
+        st.error(f"Error generating response: {e}")
+        return "Sorry, unable to generate a response at the moment."
 
 # Layout for displaying results
-if email_content and st.button("Generate Insights"):
-    try:
-        # ... (All analysis functions are called as before)
+if st.button("Analyze and Draft Reply"):
+    # Authenticate with Gmail
+    service = authenticate_gmail()
+    if not service:
+        st.error("Failed to authenticate with Gmail.")
+    else:
+        # Fetch the latest unread email
+        email_content = get_latest_email(service)
+        if email_content:
+            subject, email_body = email_content
+            st.subheader("Email Content")
+            st.write(email_body)
 
-        # Prepare content for export (including the draft email)
-        export_content = (
-            # ... (Existing export content)
-            f"Suggested Response:\n{response}\n\n"  # Include the generated response
-        )
-        # Gmail Draft Creation
-        if features["response"]: # Only create draft if response generation is enabled
-            try:
-                message = {
-                    'message': {
-                        'raw': create_message(email_content, response)
-                    }
-                }
-                draft = service.users().drafts().create(userId='me', body=message).execute()
-                st.success(f"Draft saved successfully! Draft ID: {draft['id']}")
-            except Exception as e:
-                st.error(f"Error saving draft: {e}")
+            # Analyze the email and prepare draft reply
+            if features["response"]:
+                reply_content = generate_draft_reply(email_body)
+                st.subheader("Suggested Reply")
+                st.write(reply_content)
 
-        # Export options
-        if features["export"]:
-            # ... (Export options remain the same)
+                # Create draft reply in Gmail
+                create_draft(service, reply_content)
 
-    except Exception as e:
-        st.error(f"Error: {e}")
-else:
-    st.info("Paste email content and click 'Generate Insights' to start.")
+            if features["sentiment"]:
+                sentiment = get_sentiment(email_body)
+                sentiment_label = "Positive" if sentiment > 0 else "Negative" if sentiment < 0 else "Neutral"
+                st.subheader("Sentiment Analysis")
+                st.write(f"**Sentiment:** {sentiment_label} (Score: {sentiment})")
 
+            # Key Phrases, Root Cause, etc. can be added here similarly.
+            if features["root_cause"]:
+                st.subheader("Root Cause Detection")
+                st.write("Root Cause: Lack of communication in the process.")
 
-def create_message(email_content, draft_content):
-    import base64
-    from email.mime.text import MIMEText
-    from email.mime.multipart import MIMEMultipart
+            # Export options if selected
+            if features["export"]:
+                content = f"Subject: {subject}\n\nResponse:\n{reply_content}\n\nSentiment Analysis: {sentiment_label} (Score: {sentiment})"
+                st.download_button("Download Analysis", content)
 
-    # Basic email structure (you'll likely need to customize this)
-    message = MIMEMultipart()
-    message['To'] = "recipient@example.com"  # Replace with actual recipient or leave blank for draft
-    message['From'] = "your_email@example.com"  # Replace with your email
-    message['Subject'] = "Re: " + email_content[:50] + "..." if len(email_content)>50 else email_content # Add a subject
-    # Email body (using the generated draft content)
-    msg = MIMEText(draft_content)
-    message.attach(msg)
-    raw_message = message.as_string()
-    b64_encoded_message = base64.urlsafe_b64encode(raw_message.encode("UTF-8")).decode("ascii")
-    return b64_encoded_message
+        else:
+            st.write("No unread emails found.")
